@@ -28,6 +28,7 @@ namespace DepotDownloader
         public const string DEFAULT_BRANCH = "public";
 
         public static DownloadConfig Config = new();
+        public static Action<ulong, ulong> ProgressCallback;
 
         private static Steam3Session steam3;
         private static CDNClientPool cdnPool;
@@ -316,26 +317,92 @@ namespace DepotDownloader
                 _ = AccountSettingsStore.Instance.LoginTokens.TryGetValue(username, out loginToken);
             }
 
-            steam3 = new Steam3Session(
-                new SteamUser.LogOnDetails
-                {
-                    Username = username,
-                    Password = loginToken == null ? password : null,
-                    ShouldRememberPassword = Config.RememberPassword,
-                    AccessToken = loginToken,
-                    LoginID = Config.LoginID ?? 0x534B32, // "SK2"
-                }
-            );
-
-            if (!steam3.WaitForCredentials())
+            var timeoutSecondsRaw = (Environment.GetEnvironmentVariable("STEAMDDS_STEAM3_LOGIN_TIMEOUT_SECONDS") ?? "25").Trim();
+            if (!int.TryParse(timeoutSecondsRaw, out var timeoutSeconds) || timeoutSeconds <= 0)
             {
-                Console.WriteLine("Unable to get steam3 credentials.");
-                return false;
+                timeoutSeconds = 25;
             }
 
-            Task.Run(steam3.TickCallbacks);
+            var logonDetails = new SteamUser.LogOnDetails
+            {
+                Username = username,
+                Password = loginToken == null ? password : null,
+                ShouldRememberPassword = Config.RememberPassword,
+                AccessToken = loginToken,
+                LoginID = Config.LoginID ?? 0x534B32, // "SK2"
+            };
 
-            return true;
+            var modes = ParseSteam3ConnectModes(Environment.GetEnvironmentVariable("STEAMDDS_STEAM3_CONNECT_MODES"))
+                ?? new (string Name, ProtocolTypes? Protocols)[]
+                {
+                    ("websocket", ProtocolTypes.WebSocket),
+                    ("default", null),
+                    ("tcp", ProtocolTypes.Tcp),
+                };
+
+            foreach (var mode in modes)
+            {
+                try
+                {
+                    steam3?.Disconnect(false);
+                }
+                catch
+                {
+                }
+
+                steam3 = new Steam3Session(logonDetails, protocolTypes: mode.Protocols);
+                Console.WriteLine($"Steam3 connect mode: {mode.Name}");
+
+                if (steam3.WaitForCredentials(TimeSpan.FromSeconds(timeoutSeconds)))
+                {
+                    Task.Run(steam3.TickCallbacks);
+                    return true;
+                }
+            }
+
+            Console.WriteLine("Unable to get steam3 credentials.");
+            return false;
+        }
+
+        private static (string Name, ProtocolTypes? Protocols)[] ParseSteam3ConnectModes(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            var items = raw
+                .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (items.Length == 0)
+            {
+                return null;
+            }
+
+            var result = new List<(string Name, ProtocolTypes? Protocols)>();
+            foreach (var item in items)
+            {
+                if (string.Equals(item, "default", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(("default", null));
+                    continue;
+                }
+
+                if (string.Equals(item, "tcp", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(("tcp", ProtocolTypes.Tcp));
+                    continue;
+                }
+
+                if (string.Equals(item, "websocket", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(item, "ws", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(("websocket", ProtocolTypes.WebSocket));
+                    continue;
+                }
+            }
+
+            return result.Count == 0 ? null : result.ToArray();
         }
 
         public static void ShutdownSteam3()
@@ -451,7 +518,7 @@ namespace DepotDownloader
             File.Move(fileStagingPath, fileFinalPath);
         }
 
-        public static async Task DownloadAppAsync(uint appId, List<(uint depotId, ulong manifestId)> depotManifestIds, string branch, string os, string arch, string language, bool lv, bool isUgc)
+        public static async Task DownloadAppAsync(uint appId, List<(uint depotId, ulong manifestId)> depotManifestIds, string branch, string os, string arch, string language, bool lv, bool isUgc, CancellationToken cancellationToken = default)
         {
             cdnPool = new CDNClientPool(steam3, appId);
 
@@ -590,7 +657,7 @@ namespace DepotDownloader
 
             try
             {
-                await DownloadSteam3Async(infos).ConfigureAwait(false);
+                await DownloadSteam3Async(infos, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -699,13 +766,13 @@ namespace DepotDownloader
             public ulong depotBytesUncompressed;
         }
 
-        private static async Task DownloadSteam3Async(List<DepotDownloadInfo> depots)
+        private static async Task DownloadSteam3Async(List<DepotDownloadInfo> depots, CancellationToken cancellationToken)
         {
             Ansi.Progress(Ansi.ProgressState.Indeterminate);
 
             await cdnPool.UpdateServerList();
 
-            var cts = new CancellationTokenSource();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var downloadCounter = new GlobalDownloadCounter();
             var depotsToDownload = new List<DepotFilesData>(depots.Count);
             var allFileNamesAllDepots = new HashSet<string>();
@@ -1369,6 +1436,19 @@ namespace DepotDownloader
                 downloadCounter.totalBytesUncompressed += chunk.UncompressedLength;
 
                 Ansi.Progress(downloadCounter.totalBytesUncompressed, downloadCounter.completeDownloadSize);
+            }
+
+            var cb = ProgressCallback;
+            if (cb != null)
+            {
+                ulong downloaded;
+                ulong total;
+                lock (downloadCounter)
+                {
+                    downloaded = downloadCounter.totalBytesUncompressed;
+                    total = downloadCounter.completeDownloadSize;
+                }
+                cb(downloaded, total);
             }
 
             if (remainingChunks == 0)

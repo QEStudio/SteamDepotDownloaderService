@@ -9,6 +9,7 @@ jobs:
   winget:
     name: Publish winget package
     runs-on: windows-latest
+    if: ${{ secrets.PT_WINGET != '' }}
     steps:
       - name: Submit package to Windows Package Manager Community Repository
         run: |

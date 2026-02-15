@@ -1,10 +1,13 @@
 // This file is subject to the terms and conditions defined
 // in file 'LICENSE', which is part of this source code package.
 
+// Modified by QEStudio (2026-01-26).
+
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +15,7 @@ using QRCoder;
 using SteamKit2;
 using SteamKit2.Authentication;
 using SteamKit2.CDN;
+using SteamKit2.Discovery;
 using SteamKit2.Internal;
 
 namespace DepotDownloader
@@ -53,19 +57,60 @@ namespace DepotDownloader
         int seq; // more hack fixes
         AuthSession authSession;
         readonly CancellationTokenSource abortedToken = new();
+        string disconnectHint;
 
         // input
         readonly SteamUser.LogOnDetails logonDetails;
+        readonly ProtocolTypes? protocolTypes;
 
-        public Steam3Session(SteamUser.LogOnDetails details)
+        public Steam3Session(SteamUser.LogOnDetails details, ProtocolTypes? protocolTypes = null)
         {
             this.logonDetails = details;
             this.authenticatedUser = details.Username != null || ContentDownloader.Config.UseQrCode;
+            this.protocolTypes = protocolTypes;
+
+            var cmServers = ParseCmServers(Environment.GetEnvironmentVariable("STEAMDDS_CM_SERVERS"));
+            var allowDirectoryFetch = ParseBool(Environment.GetEnvironmentVariable("STEAMDDS_STEAM3_DIRECTORY_FETCH"));
+            var connectionTimeoutSeconds = ParsePositiveInt(Environment.GetEnvironmentVariable("STEAMDDS_STEAM3_CONNECTION_TIMEOUT_SECONDS"));
 
             var clientConfiguration = SteamConfiguration.Create(config =>
-                config
-                    .WithHttpClientFactory(static purpose => HttpClientFactory.CreateHttpClient())
-            );
+            {
+                config.WithHttpClientFactory(static purpose => HttpClientFactory.CreateHttpClient());
+
+                if (protocolTypes != null)
+                {
+                    config.WithProtocolTypes(protocolTypes.Value);
+                }
+
+                if (connectionTimeoutSeconds != null)
+                {
+                    config.WithConnectionTimeout(TimeSpan.FromSeconds(connectionTimeoutSeconds.Value));
+                }
+
+                if (cmServers != null && cmServers.Count > 0 && protocolTypes != null)
+                {
+                    var provider = new MemoryServerListProvider();
+                    var records = BuildServerRecords(cmServers, protocolTypes.Value);
+                    try
+                    {
+                        provider.UpdateServerListAsync(records).GetAwaiter().GetResult();
+                    }
+                    catch
+                    {
+                    }
+
+                    config.WithServerListProvider(provider);
+                    if (allowDirectoryFetch == null)
+                    {
+                        config.WithDirectoryFetch(false);
+                    }
+                }
+
+                if (allowDirectoryFetch != null)
+                {
+                    config.WithDirectoryFetch(allowDirectoryFetch.Value);
+                }
+            });
 
             this.steamClient = new SteamClient(clientConfiguration);
 
@@ -87,9 +132,111 @@ namespace DepotDownloader
             Connect();
         }
 
+        private static bool? ParseBool(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            var trimmed = raw.Trim();
+            if (string.Equals(trimmed, "1", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "true", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "yes", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "on", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(trimmed, "0", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "false", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "no", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "off", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return null;
+        }
+
+        private static int? ParsePositiveInt(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            if (!int.TryParse(raw.Trim(), out var value) || value <= 0)
+            {
+                return null;
+            }
+
+            return value;
+        }
+
+        private static List<(string Host, int Port)> ParseCmServers(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            var items = raw
+                .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (items.Length == 0)
+            {
+                return null;
+            }
+
+            var res = new List<(string Host, int Port)>();
+            foreach (var item in items)
+            {
+                var trimmed = item.Trim();
+                var host = trimmed;
+                var port = 443;
+
+                var lastColon = trimmed.LastIndexOf(':');
+                if (lastColon > 0 && lastColon < trimmed.Length - 1 && trimmed.IndexOf(':') == lastColon)
+                {
+                    host = trimmed[..lastColon].Trim();
+                    if (!int.TryParse(trimmed[(lastColon + 1)..], out port) || port <= 0 || port > 65535)
+                    {
+                        port = 443;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(host))
+                {
+                    continue;
+                }
+
+                res.Add((host, port));
+            }
+
+            return res.Count == 0 ? null : res;
+        }
+
+        private static IEnumerable<ServerRecord> BuildServerRecords(List<(string Host, int Port)> cmServers, ProtocolTypes protocol)
+        {
+            foreach (var (host, port) in cmServers)
+            {
+                ServerRecord record;
+                try
+                {
+                    record = ServerRecord.CreateServer(host, port, protocol);
+                }
+                catch
+                {
+                    continue;
+                }
+                yield return record;
+            }
+        }
+
         public delegate bool WaitCondition();
 
-        private readonly Lock steamLock = new();
+        private readonly object steamLock = new();
 
         public bool WaitUntilCallback(Action submitter, WaitCondition waiter)
         {
@@ -119,6 +266,25 @@ namespace DepotDownloader
                 return IsLoggedOn;
 
             WaitUntilCallback(() => { }, () => IsLoggedOn);
+
+            return IsLoggedOn;
+        }
+
+        public bool WaitForCredentials(TimeSpan timeout)
+        {
+            if (IsLoggedOn || bAborted)
+            {
+                return IsLoggedOn;
+            }
+
+            var sw = Stopwatch.StartNew();
+            while (!bAborted && !IsLoggedOn && sw.Elapsed < timeout)
+            {
+                lock (steamLock)
+                {
+                    callbacks.RunWaitCallbacks(TimeSpan.FromSeconds(1));
+                }
+            }
 
             return IsLoggedOn;
         }
@@ -372,6 +538,7 @@ namespace DepotDownloader
             bExpectingDisconnectRemote = false;
             bDidDisconnect = false;
             bIsConnectionRecovery = false;
+            disconnectHint = null;
         }
 
         void Connect()
@@ -387,11 +554,13 @@ namespace DepotDownloader
 
         private void Abort(bool sendLogOff = true)
         {
+            disconnectHint ??= $"Abort(sendLogOff={sendLogOff})";
             Disconnect(sendLogOff);
         }
 
         public void Disconnect(bool sendLogOff = true)
         {
+            disconnectHint ??= $"Disconnect(sendLogOff={sendLogOff})";
             if (sendLogOff)
             {
                 steamUser.LogOff();
@@ -406,14 +575,26 @@ namespace DepotDownloader
             Ansi.Progress(Ansi.ProgressState.Hidden);
 
             // flush callbacks until our disconnected event
-            while (!bDidDisconnect)
+            var sw = Stopwatch.StartNew();
+            var maxFlush = TimeSpan.FromSeconds(2);
+            while (!bDidDisconnect && sw.Elapsed < maxFlush)
             {
-                callbacks.RunWaitAllCallbacks(TimeSpan.FromMilliseconds(100));
+                try
+                {
+                    callbacks.RunWaitAllCallbacks(TimeSpan.FromMilliseconds(100));
+                }
+                catch
+                {
+                    break;
+                }
             }
+
+            bDidDisconnect = true;
         }
 
         private void Reconnect()
         {
+            disconnectHint ??= "Reconnect()";
             bIsConnectionRecovery = true;
             steamClient.Disconnect();
         }
@@ -555,12 +736,27 @@ namespace DepotDownloader
         {
             bDidDisconnect = true;
 
-            DebugLog.WriteLine(nameof(Steam3Session), $"Disconnected: bIsConnectionRecovery = {bIsConnectionRecovery}, UserInitiated = {disconnected.UserInitiated}, bExpectingDisconnectRemote = {bExpectingDisconnectRemote}");
+            var kind = disconnected.UserInitiated ? "local" : "remote";
+            var hint = disconnectHint;
+            disconnectHint = null;
 
-            // When recovering the connection, we want to reconnect even if the remote disconnects us
+            var protocol = protocolTypes?.ToString() ?? "default";
+            DebugLog.WriteLine(nameof(Steam3Session), $"Disconnected: kind={kind}, protocol={protocol}, hint={hint}, loggedOn={IsLoggedOn}, bConnecting={bConnecting}, bAborted={bAborted}, bIsConnectionRecovery={bIsConnectionRecovery}, bExpectingDisconnectRemote={bExpectingDisconnectRemote}, backoff={connectionBackoff}");
+
             if (!bIsConnectionRecovery && (disconnected.UserInitiated || bExpectingDisconnectRemote))
             {
-                Console.WriteLine("Disconnected from Steam");
+                if (disconnected.UserInitiated)
+                {
+                    Console.WriteLine($"Disconnected from Steam (local, protocol={protocol}{(hint != null ? $", hint={hint}" : "")})");
+                }
+                else if (bExpectingDisconnectRemote)
+                {
+                    Console.WriteLine($"Disconnected from Steam (remote expected, protocol={protocol}{(hint != null ? $", hint={hint}" : "")})");
+                }
+                else
+                {
+                    Console.WriteLine($"Disconnected from Steam (remote, protocol={protocol}{(hint != null ? $", hint={hint}" : "")})");
+                }
 
                 // Any operations outstanding need to be aborted
                 bAborted = true;

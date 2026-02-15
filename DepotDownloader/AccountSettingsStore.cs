@@ -27,6 +27,9 @@ namespace DepotDownloader
         [ProtoMember(5, IsRequired = false)]
         public Dictionary<string, string> GuardData { get; private set; }
 
+        [ProtoMember(6, IsRequired = false)]
+        public string ActiveUser { get; set; }
+
         string FileName;
 
         AccountSettingsStore()
@@ -34,6 +37,7 @@ namespace DepotDownloader
             ContentServerPenalty = new ConcurrentDictionary<string, int>();
             LoginTokens = new(StringComparer.OrdinalIgnoreCase);
             GuardData = new(StringComparer.OrdinalIgnoreCase);
+            ActiveUser = null;
         }
 
         static bool Loaded
@@ -47,7 +51,7 @@ namespace DepotDownloader
         public static void LoadFromFile(string filename)
         {
             if (Loaded)
-                throw new Exception("Config already loaded");
+                return;
 
             if (IsolatedStorage.FileExists(filename))
             {
@@ -71,10 +75,24 @@ namespace DepotDownloader
             Instance.FileName = filename;
         }
 
+        public static void InitEmpty()
+        {
+            if (Loaded)
+                return;
+
+            Instance = new AccountSettingsStore();
+            Instance.FileName = null;
+        }
+
         public static void Save()
         {
             if (!Loaded)
                 throw new Exception("Saved config before loading");
+
+            if (string.IsNullOrWhiteSpace(Instance.FileName))
+            {
+                return;
+            }
 
             try
             {

@@ -28,24 +28,35 @@ namespace DepotDownloader
         }
 
         public static DepotConfigStore Instance;
+        static readonly object LoadLock = new();
 
         public static void LoadFromFile(string filename)
         {
-            if (Loaded)
-                throw new Exception("Config already loaded");
-
-            if (File.Exists(filename))
+            lock (LoadLock)
             {
-                using var fs = File.Open(filename, FileMode.Open);
-                using var ds = new DeflateStream(fs, CompressionMode.Decompress);
-                Instance = Serializer.Deserialize<DepotConfigStore>(ds);
-            }
-            else
-            {
-                Instance = new DepotConfigStore();
-            }
+                if (Loaded)
+                {
+                    if (string.Equals(Instance.FileName, filename, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
 
-            Instance.FileName = filename;
+                    Instance = null;
+                }
+
+                if (File.Exists(filename))
+                {
+                    using var fs = File.Open(filename, FileMode.Open);
+                    using var ds = new DeflateStream(fs, CompressionMode.Decompress);
+                    Instance = Serializer.Deserialize<DepotConfigStore>(ds);
+                }
+                else
+                {
+                    Instance = new DepotConfigStore();
+                }
+
+                Instance.FileName = filename;
+            }
         }
 
         public static void Save()

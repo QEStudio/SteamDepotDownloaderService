@@ -119,3 +119,9 @@ cryptopp/
 # misc
 Thumbs.db
 launchSettings.json
+
+# depots
+depots/
+
+# build
+artifacts/

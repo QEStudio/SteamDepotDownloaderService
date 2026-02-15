@@ -1,63 +1,242 @@
-DepotDownloader
-===============
+SteamDepotDownloaderService
+==========================
 
 Steam depot downloader utilizing the SteamKit2 library. Supports .NET 8.0
 
-This program must be run from a console, it has no GUI.
+This repository is a fork of SteamRE/DepotDownloader with additional features and modifications by QEStudio.
+See NOTICE and AUTHORS for attribution and modification notes.
+
+In this fork, the build output assembly name is `SteamDepotDownloaderService` (see `-V` output). CLI arguments remain compatible with DepotDownloader unless stated otherwise.
+
+Description: A GPLv2 Steam depot downloader fork that adds a self-hosted HTTP service mode and a lightweight web UI to manage install/download jobs with progress, logs, cancel, and retry.
+
+## License
+
+This project (including the service mode and frontend in this repository) is distributed under the GNU General Public License v2.0 (GPL-2.0-only). See [LICENSE](LICENSE).
+
+When distributing binaries, provide recipients the corresponding source code under GPLv2. If you use GitHub Releases, the tag source archive provided by GitHub satisfies this when it matches the released binary.
 
 ## Installation
 
-### Directly from GitHub
+### Download from GitHub Releases
 
-Download a binary from [the releases page](https://github.com/SteamRE/DepotDownloader/releases/latest).
+Download a binary from [the releases page](https://github.com/QEStudio/SteamDepotDownloaderService/releases/latest).
 
-### via Windows Package Manager CLI (aka winget)
+### Build from source
 
-On Windows, [winget](https://github.com/microsoft/winget-cli) users can download and install
-the latest Terminal release by installing the `SteamRE.DepotDownloader`
-package:
+Requirements: .NET SDK 8.x
 
-```powershell
-winget install --exact --id SteamRE.DepotDownloader
+```bash
+dotnet build DepotDownloader/DepotDownloader.csproj -c Release
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release -- -V
 ```
 
-### via Homebrew
+### Build modes (static / non-static)
 
-On macOS, [Homebrew](https://brew.sh) users can download and install that latest release by running the following commands:
+Non-static (framework-dependent, smaller output):
+```bash
+dotnet publish DepotDownloader/DepotDownloader.csproj -c Release -r linux-x64 --self-contained false -p:PublishSingleFile=false
+```
 
-```shell
-brew tap steamre/tools
-brew install depotdownloader
+Static (self-contained, single file):
+```bash
+dotnet publish DepotDownloader/DepotDownloader.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false
 ```
 
 ## Usage
 
 ### Downloading one or all depots for an app
 ```powershell
-./DepotDownloader -app <id> [-depot <id> [-manifest <id>]]
-                 [-username <username> [-password <password>]] [other options]
+./SteamDepotDownloaderService -app <id> [-depot <id> [-manifest <id>]]
+                             [-username <username> [-password <password>]] [other options]
 ```
 
-For example: `./DepotDownloader -app 730 -depot 731 -manifest 7617088375292372759`
+For example: `./SteamDepotDownloaderService -app 730 -depot 731 -manifest 7617088375292372759`
 
 By default it will use anonymous account ([view which apps are available on it here](https://steamdb.info/sub/17906/)).
 
 To use your account, specify the `-username <username>` parameter. Password will be asked interactively if you do
 not use specify the `-password` parameter.
 
-### Downloading a workshop item using pubfile id
-```powershell
-./DepotDownloader -app <id> -pubfile <id> [-username <username> [-password <password>]]
+### CLI examples
+
+Download all depots for an app into a custom directory:
+```bash
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release -- \
+  -app 730 -dir /data/depots
 ```
 
-For example: `./DepotDownloader -app 730 -pubfile 1885082371`
+Download a specific branch:
+```bash
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release -- \
+  -app 730 -branch public -dir /data/depots
+```
+
+Manifest-only (prints a human readable manifest without downloading depot content):
+```bash
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release -- \
+  -app 730 -manifest-only
+```
+
+Validate already downloaded files:
+```bash
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release -- \
+  -app 730 -dir /data/depots -validate
+```
+
+### Service mode (SteamDepotDownloaderService, QEStudio fork)
+
+This fork adds a service mode that exposes an HTTP API for installing/downloading apps and querying job status, with optional WebSocket streaming.
+
+Service mode is enabled when either:
+- `--service` is present in the arguments, or
+- environment variable `STEAMDDS_SERVICE` is set to `1|true|yes`
+
+#### Environment variables
+
+Variable | Description | Default
+---|---|---
+`STEAMDDS_SERVICE` | enable service mode (`1|true|yes`) | empty (disabled)
+`STEAMDDS_API_KEY` | API key for requests (optional). Use `X-Api-Key` or `Authorization: Bearer ...` | empty (no auth)
+`STEAMDDS_LISTEN_MODE` | `tcp` or `unix` | `tcp`
+`STEAMDDS_LISTEN_URL` | listen URL for TCP mode | `http://127.0.0.1:8080`
+`STEAMDDS_UNIX_SOCKET_PATH` | unix domain socket path for `unix` mode | `/tmp/steamdds.sock`
+`STEAMDDS_CORS_ORIGINS` | allowed CORS origins for browser clients (comma-separated, or `*`) | `http://localhost:5173,http://127.0.0.1:5173`
+
+#### Start examples
+
+TCP listener:
+```bash
+STEAMDDS_SERVICE=1 \
+STEAMDDS_LISTEN_MODE=tcp \
+STEAMDDS_LISTEN_URL=http://127.0.0.1:18080 \
+STEAMDDS_API_KEY=test \
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release
+```
+
+Unix domain socket listener:
+```bash
+STEAMDDS_SERVICE=1 \
+STEAMDDS_LISTEN_MODE=unix \
+STEAMDDS_UNIX_SOCKET_PATH=/tmp/steamdds.sock \
+STEAMDDS_API_KEY=test \
+dotnet run --project DepotDownloader/DepotDownloader.csproj -c Release
+```
+
+#### HTTP API
+
+Endpoint | Method | Description | Auth
+---|---|---|---
+`/health` | GET | health check | no
+`/api/install` | POST | create an install/download job | yes (if `STEAMDDS_API_KEY` set)
+`/api/jobs` | GET | list jobs | yes (if `STEAMDDS_API_KEY` set)
+`/api/jobs/{id}` | GET | job details + log tail | yes (if `STEAMDDS_API_KEY` set)
+`/api/jobs/{id}` | DELETE | cancel a queued/running job | yes (if `STEAMDDS_API_KEY` set)
+`/api/jobs/{id}/retry` | POST | retry a failed/canceled job (creates a new job) | yes (if `STEAMDDS_API_KEY` set)
+
+Install request body fields (`POST /api/install`):
+
+Field | Type | Required | Description
+---|---|---|---
+`appId` | number | yes | Steam AppID
+`depotId` | number | no | download a specific depot only
+`manifestId` | number | no | specify a specific manifest id (requires `depotId`)
+`branch` | string | no | branch name (default: `public`)
+`branchPassword` | string | no | branch password
+`dir` | string | no | install directory (same as `-dir`)
+`os` | string | no | `windows|macos|linux`
+`arch` | string | no | `32|64`
+`language` | string | no | language name (default: `english`)
+`lowViolence` | boolean | no | low violence depots
+`validate` | boolean | no | validate existing files
+`maxDownloads` | number | no | max concurrent chunk downloads
+`username` | string | no | Steam account username (required for restricted apps)
+`password` | string | no | Steam account password
+`rememberPassword` | boolean | no | persist login key for future sessions
+`skipAppConfirmation` | boolean | no | skip app confirmation prompt
+
+Example: list jobs (TCP mode)
+```bash
+curl -H 'X-Api-Key: test' http://127.0.0.1:18080/api/jobs
+```
+
+Example: create install job (anonymous, may fail for restricted apps)
+```bash
+curl -H 'X-Api-Key: test' -H 'Content-Type: application/json' \
+  -d '{"appId":10,"dir":"/tmp/steamdds-test","maxDownloads":1,"validate":false}' \
+  http://127.0.0.1:18080/api/install
+```
+
+Example: create install job (restricted apps require Steam account)
+```bash
+curl -H 'X-Api-Key: test' -H 'Content-Type: application/json' \
+  -d '{"appId":730,"dir":"/data/steamdds","username":"YOUR_USER","password":"YOUR_PASS","rememberPassword":true}' \
+  http://127.0.0.1:18080/api/install
+```
+
+Example: unix domain socket request
+```bash
+curl --unix-socket /tmp/steamdds.sock -H 'X-Api-Key: test' http://localhost/health
+```
+
+#### WebSocket
+
+`GET /ws` upgrades to WebSocket and streams job events:
+- `?jobId=<guid>`: only stream events for the given job
+- no `jobId`: stream events for all jobs
+If `STEAMDDS_API_KEY` is set, browsers cannot send custom headers in WebSocket handshakes. This service also accepts `?apiKey=<key>` for `/ws`.
+
+Event payload format (JSON):
+```json
+{"jobId":"...","timestamp":"...","type":"log|state|error|progress","message":"..."}
+```
+
+Progress events (`type: "progress"`) use `message` as a JSON string:
+```json
+{"phase":"Downloading Files","percent":0.42,"detail":"42% ..."}
+```
+
+#### Built-in retry behavior
+
+The service will retry transient install failures up to 3 times within the same job. For permanent failures (or after retries are exhausted), the job becomes `Failed`. You can then call `POST /api/jobs/{id}/retry` (or use the frontend Retry button) to create a new job with the same request payload.
+
+### Frontend UI (this fork)
+
+This repository includes a small web UI under [frontend](frontend) for:
+- creating install jobs
+- viewing job list + progress/phase
+- streaming logs (WebSocket)
+- canceling jobs
+- retrying failed/canceled jobs
+- exporting logs
+
+Development:
+```bash
+cd frontend
+npm ci
+VITE_PROXY_TARGET=http://127.0.0.1:18080 npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+Production build:
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+### Downloading a workshop item using pubfile id
+```powershell
+./SteamDepotDownloaderService -app <id> -pubfile <id> [-username <username> [-password <password>]]
+```
+
+For example: `./SteamDepotDownloaderService -app 730 -pubfile 1885082371`
 
 ### Downloading a workshop item using ugc id
 ```powershell
-./DepotDownloader -app <id> -ugc <id> [-username <username> [-password <password>]]
+./SteamDepotDownloaderService -app <id> -ugc <id> [-username <username> [-password <password>]]
 ```
 
-For example: `./DepotDownloader -app 730 -ugc 770604181014286929`
+For example: `./SteamDepotDownloaderService -app 730 -ugc 770604181014286929`
 
 ## Parameters
 

@@ -32,5 +32,8 @@ namespace DepotDownloader
 
         public bool UseQrCode { get; set; }
         public bool SkipAppConfirmation { get; set; }
+
+        public string DnsServer { get; set; }
+        public string HttpProxy { get; set; }
     }
 }

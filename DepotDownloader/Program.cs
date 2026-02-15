@@ -1,6 +1,8 @@
 // This file is subject to the terms and conditions defined
 // in file 'LICENSE', which is part of this source code package.
 
+// Modified by QEStudio.
+
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -21,6 +23,11 @@ namespace DepotDownloader
 
         static async Task<int> Main(string[] args)
         {
+            if (ServiceMode.ShouldRun(args))
+            {
+                return await ServiceMode.RunAsync().ConfigureAwait(false);
+            }
+
             if (args.Length == 0)
             {
                 PrintVersion();
@@ -536,15 +543,55 @@ namespace DepotDownloader
 
         static void PrintVersion(bool printExtra = false)
         {
-            var version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>().InformationalVersion;
-            Console.WriteLine($"DepotDownloader v{version}");
+            var assembly = typeof(Program).Assembly;
+            var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>().InformationalVersion;
+            Console.WriteLine($"SteamDepotDownloaderService v{version} (Modified by QEStudio)");
 
             if (!printExtra)
             {
                 return;
             }
 
+            var buildConfiguration = GetAssemblyMetadata(assembly, "BuildConfiguration");
+            var targetFramework = GetAssemblyMetadata(assembly, "TargetFramework");
+            var sourceRevisionId = GetAssemblyMetadata(assembly, "SourceRevisionId");
+
+            if (!string.IsNullOrWhiteSpace(buildConfiguration) || !string.IsNullOrWhiteSpace(targetFramework))
+            {
+                var buildParts = new List<string>(capacity: 2);
+
+                if (!string.IsNullOrWhiteSpace(buildConfiguration))
+                {
+                    buildParts.Add(buildConfiguration);
+                }
+
+                if (!string.IsNullOrWhiteSpace(targetFramework))
+                {
+                    buildParts.Add(targetFramework);
+                }
+
+                Console.WriteLine($"Build: {string.Join(' ', buildParts)}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(sourceRevisionId))
+            {
+                Console.WriteLine($"Commit: {sourceRevisionId}");
+            }
+
             Console.WriteLine($"Runtime: {RuntimeInformation.FrameworkDescription} on {RuntimeInformation.OSDescription}");
+        }
+
+        static string GetAssemblyMetadata(Assembly assembly, string key)
+        {
+            foreach (var metadata in assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
+            {
+                if (string.Equals(metadata.Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return metadata.Value;
+                }
+            }
+
+            return null;
         }
     }
 }
